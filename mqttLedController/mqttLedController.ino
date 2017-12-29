@@ -10,6 +10,12 @@
 // MQTT
 #include <PubSubClient.h>
 
+// Neopixel
+#include <Adafruit_NeoPixel.h>
+#ifdef __AVR__
+#include <avr/power.h>
+#endif
+
 // ++++++++++++++++++++++++++++++++
 // Settings
 // ++++++++++++++++++++++++++++++++
@@ -17,22 +23,43 @@
 #define TESTING false									// set to true to reset all data
 
 // Wlan settings
-#define configSSID "LEDController"		// name of the AP used to configure the settings
-#define configPW "password"           // password for the AP used to configure the settings
+#define configSSID  "LEDController"		// name of the AP used to configure the settings
+#define configPW    "password"        // password for the AP used to configure the settings
+
+// LED settings
+#define NEO_PIN   2                   // NeoPixel DATA pin
+#define NEO_PTYPE NEO_GRBW            // type of led
+#define NUMPIXELS 33                  // Number of pixel in the strip
+#define MAX_BRIGHTNESS  128           // max brightness (0-255)
+int r = 0, g = 0, b = 0, w = 255;     // start led color (0-255)
+int brightness = 100;                 // current brightness in percent 1-100
+unsigned long patternInterval = 30 ;  // time between steps in the pattern, lower value means faster animations
 
 // MQTT settings
-char* mqtt_client_name =  "HeadphoneController";
-char* mqtt_server =       "192.168.2.105";
-char* mqtt_port =         "1883";
-char* mqtt_user =         "";
-char* mqtt_pass =         "";
+char* mqtt_client_name =  "HeadphoneController";  // used as name send to the mqtt client and as master topic
+char* mqtt_server =       "192.168.2.105";        // ip adress of the mqtt server
+char* mqtt_port =         "1883";                 // standard port is 1883
+char* mqtt_user =         "";                     // empty if no authentification is needed
+char* mqtt_pass =         "";                     // empty if no authentification is needed
 
+// TODO split up code
+// TODO set topics with clientname
+// TODO set LWT
 
 // ++++++++++++++++++++++++++++++++
 // Don't change stuff beyond this point
 // ++++++++++++++++++++++++++++++++
 WiFiClient WiFiClient;
 PubSubClient mqttClient(WiFiClient);
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUMPIXELS, NEO_PIN, NEO_PTYPE + NEO_KHZ800);
+
+char* colorTopic = "HeadphoneController/color";
+char* modeTopic = "HeadphoneController/mode";
+char* statusTopic = "HeadphoneController/status";
+char* dimmerTopic = "HeadphoneController/dimmer";
+
+unsigned long lastUpdate = 0 ;        // for millis() when last update occoured
+int currentMode = 0;                  // display mode for led: 0 = set color, 1 = rainbwo, 2 ...
 
 //flag for saving data
 bool shouldSaveConfig = false;
@@ -41,6 +68,15 @@ void setup() {
 	Serial.begin(115200);
   Serial.println();
   Serial.println("Starting setup");
+
+  // init leds
+  strip.begin(); 
+  strip.setBrightness(MAX_BRIGHTNESS); // set brightness
+  strip.show(); // Initialize all pixels to 'off'
+
+  blinkBlocking(); // blink 3 times to indicate startup
+  blinkBlocking();
+  blinkBlocking();
 
   //clean FS, for testing
   #if TESTING
@@ -102,6 +138,8 @@ void setup() {
   mqttClient.setServer(mqtt_server, portNumber);
   mqttClient.setCallback(mqttCallback);
 
+  blinkBlocking(); // setup done
+
   Serial.println("===== Setup done =====");
 }
 
@@ -110,9 +148,14 @@ void loop() {
   if (!mqttClient.connected()) {
     reconnect();
   }
+
+  // keep mqtt and wifi connection running
   mqttClient.loop();
 
-  // content...
+  // keep led running
+  if(millis() - lastUpdate > patternInterval) {
+    updatePattern(currentMode);
+  }
 }
 
 void initFileSystem() {
@@ -178,11 +221,67 @@ void saveConfigCallback () {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-    // message received
-    Serial.print("Got message from topic ");
-    Serial.print(topic);
-    Serial.print(" and content ");
-    //Serial.println(&payload)
+  // message received
+  Serial.print("Got message from topic ");
+  Serial.print(topic);
+
+  if (strcmp(topic, modeTopic)==0) {
+    Serial.println("Message is new mode");
+
+    payload[length] = '\0';
+    String newMode = String((char*)payload);
+    
+    currentMode = newMode.toInt();
+    currentMode = currentMode % 5; // there are only 5 possible modes (0-4)
+    if (currentMode < 0) {
+      currentMode = 0;
+    }
+  }
+
+  if (strcmp(topic, dimmerTopic)==0) {
+    Serial.print("Got new dimmer value ");
+    payload[length] = '\0';
+    String dimmerValue = String((char*)payload);
+    Serial.println(dimmerValue);
+
+    brightness = dimmerValue.toInt();
+    brightness = brightness % 101;
+    if (brightness < 0) {
+      brightness = 0;
+    }
+  }
+
+  if (strcmp(topic, colorTopic)==0) {
+    Serial.print("Incoming new color value ");
+    payload[length] = '\0';
+    String RGBWvalue = String((char*)payload);
+    Serial.println(RGBWvalue);
+    
+    if (RGBWvalue.length() == 15) {
+    // rrr,ggg,bbb,www
+    // 0123456789....14
+
+      if (RGBWvalue.charAt(3) == ',' && RGBWvalue.charAt(7) == ',' && RGBWvalue.charAt(11) == ',') {
+        // split string at every "," and store in proper variable, value with error returns 0
+        r = RGBWvalue.substring(0, 3).toInt();
+        g = RGBWvalue.substring(4, 7).toInt();
+        b = RGBWvalue.substring(8, 11).toInt();
+        w = RGBWvalue.substring(12, 15).toInt();
+        Serial.print("Got new color value ");
+        Serial.print(r);
+        Serial.print(" ");
+        Serial.print(g);
+        Serial.print(" ");
+        Serial.print(b);
+        Serial.print(" ");
+        Serial.println(w);
+      } else {
+        Serial.println("Could not find delimiter in new color value");
+      }
+    } else {
+      Serial.println("Got color value of unknown length");
+    }
+  }
 }
 
 void reconnect() {
@@ -193,7 +292,7 @@ void reconnect() {
     if (mqttClient.connect(mqtt_client_name, mqtt_server, mqtt_port)) {
       Serial.println("MQTT connected");
       startListeningToMQTTMessages();
-      mqttClient.publish("HeadphoneController/status", "Started");
+      mqttClient.publish(statusTopic, "Started");
     } else {
       Serial.print("failed, rc=");
       Serial.print(mqttClient.state());
@@ -206,6 +305,136 @@ void reconnect() {
 
 // TODO read first part of topics from name variable
 void startListeningToMQTTMessages() {
-  mqttClient.subscribe("HeadphoneController/color");
-  mqttClient.subscribe("HeadphoneController/mode");
+  mqttClient.subscribe(colorTopic);
+  mqttClient.subscribe(modeTopic);
+  mqttClient.subscribe(dimmerTopic);
+}
+
+// ++++++++++++++++++++++++++++++++
+// LED control code
+// ++++++++++++++++++++++++++++++++
+void blinkBlocking() {
+  for(int i=0; i<strip.numPixels(); i++) {
+      strip.setPixelColor(i, strip.Color(0,0,255));
+  }
+  strip.show();
+  delay(500);
+  wipe();
+}
+
+void  updatePattern(int pat){ // call the pattern currently being created
+  switch(pat) {
+    case 0:
+        rainbow(); 
+        break;
+    case 1: 
+        rainbowCycle();
+        break;
+    case 2:
+        theaterChaseRainbow(); 
+        break;
+    case 3:
+         colorWipe(getScaledColor(r,g,b,w));
+         break;    
+    case 4:
+         staticColor(getScaledColor(r,g,b,w)); 
+         break;  
+  }  
+}
+
+void rainbow() { // modified from Adafruit example to make it a state machine
+  static uint16_t j=0;
+    for(int i=0; i<strip.numPixels(); i++) {
+      strip.setPixelColor(i, Wheel((i+j) & 255));
+    }
+    strip.show();
+     j++;
+  if(j >= 256) j=0;
+  lastUpdate = millis(); // time for next change to the display
+  
+}
+void rainbowCycle() { // modified from Adafruit example to make it a state machine
+  static uint16_t j=0;
+    for(int i=0; i< strip.numPixels(); i++) {
+      strip.setPixelColor(i, Wheel(((i * 256 / strip.numPixels()) + j) & 255));
+    }
+    strip.show();
+  j++;
+  if(j >= 256*5) j=0;
+  lastUpdate = millis(); // time for next change to the display
+}
+
+void theaterChaseRainbow() { // modified from Adafruit example to make it a state machine
+  static int j=0, q = 0;
+  static boolean on = true;
+     if(on){
+            for (int i=0; i < strip.numPixels(); i=i+3) {
+                strip.setPixelColor(i+q, Wheel( (i+j) % 255));    //turn every third pixel on
+             }
+     }
+      else {
+           for (int i=0; i < strip.numPixels(); i=i+3) {
+               strip.setPixelColor(i+q, 0);        //turn every third pixel off
+                 }
+      }
+     on = !on; // toggel pixelse on or off for next time
+      strip.show(); // display
+      q++; // update the q variable
+      if(q >=3 ){ // if it overflows reset it and update the J variable
+        q=0;
+        j++;
+        if(j >= 256) j = 0;
+      }
+  lastUpdate = millis(); // time for next change to the display    
+}
+
+void colorWipe(uint32_t c) { // modified from Adafruit example to make it a state machine
+  static int i =0;
+    strip.setPixelColor(i, c);
+    strip.show();
+  i++;
+  if(i >= strip.numPixels()){
+    i = 0;
+    wipe(); // blank out strip
+  }
+  lastUpdate = millis(); // time for next change to the display
+}
+
+void staticColor(uint32_t c) { // modified from Adafruit example to make it a state machine
+  for(int i=0; i<strip.numPixels(); i++) {
+      strip.setPixelColor(i, c);
+  }
+  strip.show();
+  lastUpdate = millis(); // time for next change to the display
+}
+
+void wipe(){ // clear all LEDs
+     for(int i=0;i<strip.numPixels();i++){
+       strip.setPixelColor(i, strip.Color(0,0,0)); 
+       }
+}
+
+uint32_t Wheel(byte WheelPos) {
+  WheelPos = 255 - WheelPos;
+  if(WheelPos < 85) {
+    int wheelR = 255 - WheelPos * 3, wheelG = 0, wheelB = WheelPos * 3;
+    return getScaledColor(wheelR, wheelG, wheelB, 0);
+  }
+  if(WheelPos < 170) {
+    WheelPos -= 85;
+    int wheelR = 0, wheelG = WheelPos * 3, wheelB = 255 - WheelPos * 3;
+    return getScaledColor(wheelR, wheelG, wheelB, 0);
+  }
+  WheelPos -= 170;
+  int wheelR = WheelPos * 3, wheelG = 255 - WheelPos * 3, wheelB = 0;
+  return getScaledColor(wheelR, wheelG, wheelB, 0);
+}
+
+uint32_t getScaledColor(int newR, int newG, int newB, int newW) {
+  return strip.Color(
+    newR/100*brightness,
+    newG/100*brightness,
+    newB/100*brightness,
+    newW/100*brightness
+  );
 }
