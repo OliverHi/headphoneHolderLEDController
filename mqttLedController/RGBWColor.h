@@ -1,3 +1,8 @@
+#ifndef RGBWCOLOR
+#define RGBWCOLOR
+
+#include <Arduino.h>
+
 class RGBWColor {
     public:
         RGBWColor(int r, int g, int b, int w);
@@ -5,7 +10,7 @@ class RGBWColor {
         int getG();
         int getB();
         int getW();
-        RGBWColor scaledToBrightness(int brightness0);
+        void scaleToBrightness(int brightness);
 
     private:
         int r;
@@ -13,3 +18,5 @@ class RGBWColor {
         int b;
         int w;
 };
+
+#endif

@@ -1,8 +1,8 @@
-#include <FS.h>                           // needs to be first
-#include <ESP8266WiFi.h>               //ESP8266 Core WiFi Library
+#include <FS.h>                      // needs to be first
+#include <ESP8266WiFi.h>             //ESP8266 Core WiFi Library
 
 // for wifimanager
-#include <DNSServer.h>                  //Local DNS Server used for redirecting all requests to the configuration portal
+#include <DNSServer.h>               //Local DNS Server used for redirecting all requests to the configuration portal
 #include <ESP8266WebServer.h>        //Local WebServer used to serve the configuration portal
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
@@ -14,7 +14,10 @@
 #include <Adafruit_NeoPixel.h>
 
 // Animations
+#include "Animation.h"
 #include "Rainbow.h"
+#include "Fade.h"
+#include "StaticColor.h"
 
 #ifdef __AVR__
 #include <avr/power.h>
@@ -24,10 +27,10 @@
 // Settings
 // ++++++++++++++++++++++++++++++++
 
-#define TESTING false                                    // set to true to reset all data
+#define TESTING false                 // set to true to reset all data
 
 // Wlan settings
-#define configSSID  "LEDController"        // name of the AP used to configure the settings
+#define configSSID  "LEDController"   // name of the AP used to configure the settings
 #define configPW    "password"        // password for the AP used to configure the settings
 
 // LED settings
@@ -37,16 +40,14 @@
 #define MAX_BRIGHTNESS  128           // max brightness (0-255)
 int r = 0, g = 0, b = 0, w = 255;     // start led color (0-255)
 int brightness = 100;                 // current brightness in percent 1-100
-unsigned long patternInterval = 150;  // time between steps in the pattern, lower value means faster animations
 
 // MQTT settings
-char *mqtt_client_name = "HeadphoneController";  // used as name send to the mqtt client and as master topic
-char *mqtt_server = "192.168.2.105";        // ip adress of the mqtt server
-char *mqtt_port = "1883";                 // standard port is 1883
-char *mqtt_user = "";                     // empty if no authentification is needed
-char *mqtt_pass = "";                     // empty if no authentification is needed
+char *mqtt_client_name = "HeadphoneController"; // used as name send to the mqtt client and as master topic
+char *mqtt_server = "192.168.2.111";            // ip adress of the mqtt server
+char *mqtt_port = "1883";                       // standard port is 1883
+char *mqtt_user = "";                           // empty if no authentification is needed
+char *mqtt_pass = "";                           // empty if no authentification is needed
 
-// TODO split up code
 // TODO set topics with clientname
 // TODO set LWT
 
@@ -56,19 +57,26 @@ char *mqtt_pass = "";                     // empty if no authentification is nee
 WiFiClient WiFiClient;
 PubSubClient mqttClient(WiFiClient);
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUMPIXELS, NEO_PIN, NEO_PTYPE + NEO_KHZ800);
+
 // animations
-Rainbow rainbowAnimation = Rainbow(100, strip, 255);
+Rainbow rainbowAnimation = Rainbow(100, strip, 255, brightness);
+Fade fadeAnimation = Fade(60, strip, 255, brightness);
+StaticColor staticColorAnimation = StaticColor(500, strip, 1, brightness);
+const int numberOfAnimations = 3;
+int currentAnimationNumber = 0;
+Animation* animations[numberOfAnimations] = {&rainbowAnimation, &fadeAnimation, &staticColorAnimation};
+Animation* currentAnimation = animations[0];
 
 char *colorTopic = "HeadphoneController/color";
 char *modeTopic = "HeadphoneController/mode";
 char *statusTopic = "HeadphoneController/status";
 char *dimmerTopic = "HeadphoneController/dimmer";
 
-unsigned long lastUpdate = 0;        // for millis() when last update occoured
-int currentMode = 0;                  // display mode for led: 0 = set color, 1 = rainbwo, 2 ...
-
 //flag for saving data
 bool shouldSaveConfig = false;
+
+// TODO delete
+unsigned long lastUpdate;
 
 void setup() {
     Serial.begin(115200);
@@ -77,7 +85,7 @@ void setup() {
 
     // init leds
     strip.begin();
-    strip.setBrightness(MAX_BRIGHTNESS); // set brightness
+    strip.setBrightness(MAX_BRIGHTNESS); // set maximal brightness
     strip.show(); // Initialize all pixels to 'off'
 
     blinkBlocking(); // blink 3 times to indicate startup
@@ -158,11 +166,8 @@ void loop() {
     // keep mqtt and wifi connection running
     mqttClient.loop();
 
-    // keep led running
-    //if (millis() - lastUpdate > patternInterval) {
-    //    updatePattern(currentMode);
-    //}
-    rainbowAnimation.update();
+    // keep animation running
+    currentAnimation->update();
 }
 
 void initFileSystem() {
@@ -237,11 +242,15 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
         payload[length] = '\0';
         String newMode = String((char *) payload);
 
-        currentMode = newMode.toInt();
-        currentMode = currentMode % 6; // there are only 5 possible modes (0-4)
-        if (currentMode < 0) {
-            currentMode = 0;
+        currentAnimationNumber = newMode.toInt();
+
+        // don't access unexisting animation
+        currentAnimationNumber = currentAnimationNumber % numberOfAnimations; 
+        if (currentAnimationNumber < 0) {
+            currentAnimationNumber = 0;
         }
+
+        currentAnimation = animations[currentAnimationNumber];
     }
 
     if (strcmp(topic, dimmerTopic) == 0) {
@@ -255,6 +264,9 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
         if (brightness < 0) {
             brightness = 0;
         }
+        
+        // TODO set brightness for every animation?
+        currentAnimation->setBrightness(brightness);
     }
 
     if (strcmp(topic, colorTopic) == 0) {
@@ -281,6 +293,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
                 Serial.print(b);
                 Serial.print(" ");
                 Serial.println(w);
+                currentAnimation->setColor(RGBWColor(r, g, b, w));
             } else {
                 Serial.println("Could not find delimiter in new color value");
             }
@@ -328,21 +341,6 @@ void blinkBlocking() {
     wipe();
     strip.show();
     delay(500);
-}
-
-void updatePattern(int pat) { // call the pattern currently being created
-    
-}
-
-void rainbow() { // modified from Adafruit example to make it a state machine
-    static uint16_t j = 0;
-    for (int i = 0; i < strip.numPixels(); i++) {
-        strip.setPixelColor(i, Wheel((i + j) & 255));
-    }
-    strip.show();
-    j++;
-    if (j >= 256) j = 0;
-    lastUpdate = millis(); // time for next change to the display
 }
 
 void threeRingColorFade(uint32_t color) {
@@ -414,14 +412,6 @@ void colorWipe(uint32_t c) { // modified from Adafruit example to make it a stat
         i = 0;
         wipe(); // blank out strip
     }
-    lastUpdate = millis(); // time for next change to the display
-}
-
-void staticColor(uint32_t c) { // modified from Adafruit example to make it a state machine
-    for (int i = 0; i < strip.numPixels(); i++) {
-        strip.setPixelColor(i, c);
-    }
-    strip.show();
     lastUpdate = millis(); // time for next change to the display
 }
 
